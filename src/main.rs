@@ -5,6 +5,9 @@ use clap::Parser;
 use reqwest::header;
 use serde::Deserialize;
 
+#[allow(dead_code)]
+mod gphotos;
+
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct Pictures {
