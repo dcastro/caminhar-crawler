@@ -111,6 +111,7 @@ async fn download_media(pic: &Picture, cookie: &str, dir: &Path, index: usize, c
 
     let label = label.trim();
     let description = description.trim();
+    let short_date = NaiveDate::parse_from_str(short_date, "%d-%m-%Y").unwrap();
 
     println!(
         "Downloading media {}/{}: {img_large_id} - {label} - {img_large}",
@@ -149,15 +150,21 @@ async fn download_media(pic: &Picture, cookie: &str, dir: &Path, index: usize, c
     };
 
     // Save file
-    let file_path = dir.join(make_filename(short_date, *img_large_id, label, extension));
+    let file_path = dir.join(make_filename(&short_date, *img_large_id, label, extension));
     File::create(&file_path).unwrap().write_all(&bytes).unwrap();
 
     let file_path = fix_extension(&file_path, type_);
 
-    add_metadata_tags(&file_path, is_image, short_date, label, description);
+    add_metadata_tags(&file_path, is_image, &short_date, label, description);
 }
 
-fn make_filename(short_date: &str, img_large_id: u32, label: &str, extension: &str) -> String {
+fn make_filename(
+    short_date: &NaiveDate,
+    img_large_id: u32,
+    label: &str,
+    extension: &str,
+) -> String {
+    let short_date = short_date.format("%Y-%m-%d").to_string();
     let filename = format!("[{short_date}] {img_large_id} {label}.{extension}");
 
     // Some descriptions have invalid characters, e.g. '/', so we have to sanitize them.
@@ -170,7 +177,7 @@ fn make_filename(short_date: &str, img_large_id: u32, label: &str, extension: &s
     sanitize_filename::sanitize_with_options(filename, options)
 }
 
-fn add_metadata_tags(path: &Path, is_image: bool, short_date: &str, label: &str, desc: &str) {
+fn add_metadata_tags(path: &Path, is_image: bool, short_date: &NaiveDate, label: &str, desc: &str) {
     let short_date = convert_date_to_exif_format(short_date);
 
     // https://exiftool.org/TagNames/QuickTime.html
@@ -220,10 +227,8 @@ fn call_exiftool(path: &Path, tags: &[(&str, &str)]) {
 }
 
 /// Converts `13-01-2026` to `2026:01:13 13:00:00+00:00`
-fn convert_date_to_exif_format(short_date: &str) -> String {
-    // Convert "13-01-2026" to "2026:01:13 00:00:00+00:00"
-    let date = NaiveDate::parse_from_str(short_date, "%d-%m-%Y").unwrap();
-    let datetime = date.and_hms_opt(13, 0, 0).unwrap();
+fn convert_date_to_exif_format(short_date: &NaiveDate) -> String {
+    let datetime = short_date.and_hms_opt(13, 0, 0).unwrap();
     let datetime_utc = datetime.and_utc();
     datetime_utc.format("%Y:%m:%d %H:%M:%S%:z").to_string()
 }
