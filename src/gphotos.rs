@@ -36,6 +36,11 @@ use reqwest::header;
 ///     * google-api-rust-client-unoffical
 ///       Same as above, this library only supports service accounts.
 ///
+/// CLI tools:
+///     * https://github.com/gphotosuploader/gphotos-uploader-cli
+///     * https://github.com/int128/gpup
+///     * https://docs.rs/crate/google-photoslibrary1-cli/latest
+///
 /// TODOs:
 ///     * parameterize the path to the token storage
 ///     * parameterize the path to the client secret file
