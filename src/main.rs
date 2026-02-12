@@ -6,8 +6,6 @@ use std::path::PathBuf;
 
 use chrono::NaiveDate;
 use clap::Parser;
-use little_exif::exif_tag::ExifTag;
-use little_exif::metadata::Metadata;
 use reqwest::header;
 use serde::Deserialize;
 use serde::Serialize;
@@ -33,8 +31,6 @@ struct Picture {
     // video/mp4 or image/jpeg
     #[serde(rename = "type")]
     type_: String,
-
-    is_video: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -102,6 +98,7 @@ async fn download_all_media(pics: &Pictures, cookie: &str, dir: &Path) {
     }
 }
 
+#[allow(clippy::match_like_matches_macro)]
 async fn download_media(pic: &Picture, cookie: &str, dir: &Path, index: usize, count: usize) {
     let Picture {
         label,
@@ -110,7 +107,6 @@ async fn download_media(pic: &Picture, cookie: &str, dir: &Path, index: usize, c
         img_large,
         img_large_id,
         type_,
-        is_video,
     } = pic;
 
     let label = label.trim();
@@ -143,7 +139,13 @@ async fn download_media(pic: &Picture, cookie: &str, dir: &Path, index: usize, c
     let extension = match type_.as_str() {
         "video/mp4" => "mp4",
         "image/jpeg" => "jpg",
+        "application/pdf" => "pdf",
         other => panic!("unknown media type: {other}"),
+    };
+
+    let is_image = match type_.as_str() {
+        "image/jpeg" => true,
+        _ => false,
     };
 
     // Save file
@@ -152,8 +154,7 @@ async fn download_media(pic: &Picture, cookie: &str, dir: &Path, index: usize, c
 
     let file_path = fix_extension(&file_path, type_);
 
-    let label_desc = merge_label_desc(label, description);
-    edit_exif_tags(&file_path, *is_video, short_date, label_desc);
+    add_metadata_tags(&file_path, is_image, short_date, label, description);
 }
 
 fn make_filename(short_date: &str, img_large_id: u32, label: &str, extension: &str) -> String {
@@ -169,39 +170,52 @@ fn make_filename(short_date: &str, img_large_id: u32, label: &str, extension: &s
     sanitize_filename::sanitize_with_options(filename, options)
 }
 
-fn edit_exif_tags(path: &Path, is_video: bool, short_date: &str, label_desc: String) {
+fn add_metadata_tags(path: &Path, is_image: bool, short_date: &str, label: &str, desc: &str) {
     let short_date = convert_date_to_exif_format(short_date);
 
-    if !is_video {
-        // exiftool <file> -DateTimeOriginal="2026:01:13 00:00:00+00:00" -CreateDate="2026:01:13 00:00:00+00:00" -ImageDescription="desc"
-        //
-        // Note: Unfortunately, Google Photos does not display the `ImageDescription` exif tag
-        // (though it does display the `Description` tag, which is not an exif tag).
-        let mut metadata: Metadata = Metadata::new();
-        metadata.set_tag(ExifTag::CreateDate(short_date.clone()));
-        metadata.set_tag(ExifTag::DateTimeOriginal(short_date.clone()));
-        metadata.set_tag(ExifTag::ImageDescription(label_desc));
-        metadata.write_to_file(path).unwrap();
-    } else {
-        // The `little-exif` crate will fail if we try to edit the exif tags of an mp4 file:
-        // > Custom { kind: Unsupported, error: "Unsupported file type: mp4 - Unknown file type: mp4" }
-        //
-        // But the `exiftool` command works fine.
-        let status = std::process::Command::new("exiftool")
-            .arg("-s")
-            .arg("-overwrite_original")
-            .arg(path.as_os_str())
-            .arg(format!("-CreateDate={short_date}"))
-            .status()
-            .expect("failed to run exiftool");
-        if !status.success() {
-            panic!("exiftool failed with status: {status}");
-        }
+    // https://exiftool.org/TagNames/QuickTime.html
+    // https://exiftool.org/TagNames/XMP.html
+    // https://exiftool.org/TagNames/EXIF.html
+    // https://exiftool.org/faq.html
+    // https://exiftool.org/TagNames/JPEG.html
+    // https://exiftool.org/TagNames/PDF.html
+    call_exiftool(
+        path,
+        &[
+            ("CreateDate", &short_date),
+            ("Title", label),
+            // Google Photos displays the `Description` tag in the image's properties sidebar.
+            ("Description", desc),
+        ],
+    );
 
-        // Set mp4 comment, similar to how you'd use `ffmpeg` (or `ffprobe` to read it).
-        let mut tag = mp4ameta::Tag::read_from_path(path).unwrap();
-        tag.set_comment(label_desc);
-        tag.write_to_path(path).unwrap();
+    if is_image {
+        call_exiftool(
+            path,
+            &[
+                ("DateTimeOriginal", &short_date),
+                ("ImageDescription", desc),
+            ],
+        );
+    }
+}
+
+fn call_exiftool(path: &Path, tags: &[(&str, &str)]) {
+    let tags = tags.iter().map(|(k, v)| format!("-{k}={v}"));
+
+    // Example usage:
+    // exiftool <file> -DateTimeOriginal="2026:01:13 00:00:00+00:00" -CreateDate="2026:01:13 00:00:00+00:00" -ImageDescription="desc"
+
+    // https://exiftool.org/exiftool_pod.html
+    let status = std::process::Command::new("exiftool")
+        .arg("-s")
+        .arg("-overwrite_original")
+        .arg(path)
+        .args(tags)
+        .status()
+        .expect("failed to run exiftool");
+    if !status.success() {
+        panic!("exiftool failed with status: {status}");
     }
 }
 
@@ -212,16 +226,6 @@ fn convert_date_to_exif_format(short_date: &str) -> String {
     let datetime = date.and_hms_opt(13, 0, 0).unwrap();
     let datetime_utc = datetime.and_utc();
     datetime_utc.format("%Y:%m:%d %H:%M:%S%:z").to_string()
-}
-
-fn merge_label_desc(label: &str, description: &str) -> String {
-    if label.is_empty() {
-        description.to_owned()
-    } else if description.is_empty() {
-        label.to_owned()
-    } else {
-        format!("{label}\n---\n{description}")
-    }
 }
 
 /// Some files are incorrectly tagged.

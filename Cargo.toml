@@ -13,8 +13,6 @@ clap = { version = "4.5.57", features = ["derive"] }
 itertools = "0.14.0"
 bytes = "1.10.0"
 http-body-util = "0.1.2"
-little_exif = "0.6.23"
-mp4ameta = "0.13.0"
 chrono = "0.4.43"
 infer = "0.19.0"
 sanitize-filename = "0.6.0"
