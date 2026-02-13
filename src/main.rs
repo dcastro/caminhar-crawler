@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
@@ -20,7 +21,7 @@ struct Pictures {
     pictures: Vec<Picture>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct Picture {
     label: String,
@@ -48,6 +49,7 @@ struct Args {
 #[derive(Serialize, Deserialize, Debug)]
 struct State {
     latest_saved_img_id: Option<u32>,
+    latest_uploaded_img_id: Option<u32>,
 }
 
 impl State {
@@ -58,6 +60,7 @@ impl State {
         } else {
             State {
                 latest_saved_img_id: None,
+                latest_uploaded_img_id: None,
             }
         }
     }
@@ -65,6 +68,17 @@ impl State {
     fn save_to_file(&self, path: &Path) {
         let file = File::create(path).unwrap();
         serde_json::to_writer_pretty(file, self).unwrap();
+    }
+
+    fn get_latest_img_ids(&self) -> Option<BTreeSet<u32>> {
+        let mut ids = BTreeSet::new();
+        if let Some(id) = self.latest_saved_img_id {
+            ids.insert(id);
+        }
+        if let Some(id) = self.latest_uploaded_img_id {
+            ids.insert(id);
+        }
+        if ids.is_empty() { None } else { Some(ids) }
     }
 }
 
@@ -76,12 +90,36 @@ async fn main() {
     let args = Args::parse();
     let mut state = State::load_from_file(&args.state_path);
 
-    let pics = fetch_pics(&cookie, state.latest_saved_img_id).await;
+    let pics = fetch_pics(&cookie, state.get_latest_img_ids()).await;
 
-    download_all_media(&pics, &cookie, &args, &mut state).await;
+    let pics_to_download = match state.latest_saved_img_id {
+        Some(latest_saved_img_id) => pics
+            .pictures
+            .iter()
+            .take_while(|pic| pic.img_large_id != latest_saved_img_id)
+            .cloned()
+            .collect_vec(),
+        None => pics.pictures.clone(),
+    };
+
+    let pics_to_upload = match state.latest_uploaded_img_id {
+        Some(latest_uploaded_img_id) => pics
+            .pictures
+            .iter()
+            .take_while(|pic| pic.img_large_id != latest_uploaded_img_id)
+            .cloned()
+            .collect_vec(),
+        None => pics.pictures.clone(),
+    };
+
+    // TODO: remove this
+    let file = File::create("pics.json").unwrap();
+    serde_json::to_writer_pretty(file, &pics).unwrap();
+
+    download_all_media(&pics_to_download, &cookie, &args, &mut state).await;
 }
 
-async fn fetch_pics(cookie: &str, latest_saved_img_id: Option<u32>) -> Pictures {
+async fn fetch_pics(cookie: &str, mut latest_saved_ids: Option<BTreeSet<u32>>) -> Pictures {
     let url = "https://ocaminhar.educabiz.com/childctrl/childgalleryloadmore";
 
     let mut all_pics = Pictures { pictures: vec![] };
@@ -90,7 +128,7 @@ async fn fetch_pics(cookie: &str, latest_saved_img_id: Option<u32>) -> Pictures 
     loop {
         println!("Fetching page {page}...");
 
-        let mut pics = reqwest::Client::builder()
+        let pics = reqwest::Client::builder()
             .build()
             .unwrap()
             .get(url)
@@ -108,34 +146,28 @@ async fn fetch_pics(cookie: &str, latest_saved_img_id: Option<u32>) -> Pictures 
             break;
         }
 
-        // If we have previously saved some pictures, we can stop fetching when we reach the latest saved picture.
-        if let Some(latest_saved_img_id) = latest_saved_img_id
-            && let Some((idx, _)) = pics
-                .pictures
-                .iter()
-                .find_position(|pic| pic.img_large_id == latest_saved_img_id)
-        {
-            pics.pictures.truncate(idx);
-            all_pics.pictures.extend(pics.pictures);
-            break;
+        // We break when we've reached either the last saved picture or the last updloaded picture, whichever is oldest.
+        for pic in pics.pictures {
+            if let Some(latest_saved_ids) = &mut latest_saved_ids {
+                latest_saved_ids.remove(&pic.img_large_id);
+                if latest_saved_ids.is_empty() {
+                    return all_pics;
+                }
+            }
+            all_pics.pictures.push(pic);
         }
 
-        all_pics.pictures.extend(pics.pictures);
         page += 1;
     }
 
     all_pics
 }
 
-async fn download_all_media(pics: &Pictures, cookie: &str, args: &Args, state: &mut State) {
-    let count = pics.pictures.len();
+async fn download_all_media(pics: &[Picture], cookie: &str, args: &Args, state: &mut State) {
+    let count = pics.len();
     println!("Downloading {} media files.", count);
 
-    // TODO: remove this
-    let file = File::create("pics.json").unwrap();
-    serde_json::to_writer_pretty(file, pics).unwrap();
-
-    for (index, pic) in pics.pictures.iter().rev().enumerate() {
+    for (index, pic) in pics.iter().rev().enumerate() {
         download_media(pic, cookie, args, index, count, state).await;
     }
 }

@@ -157,6 +157,7 @@ dependencies = [
  "http-body-util",
  "infer",
  "itertools",
+ "mitsein",
  "reqwest",
  "rustls",
  "sanitize-filename",
@@ -977,6 +978,20 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "mitsein"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a49aef75c004fb496a23f175395415ecfe2a630e4c6175ae6f7d9cc1a19332e"
+dependencies = [
+ "either",
+ "indexmap 2.13.0",
+ "itertools",
+ "schemars 1.2.1",
+ "serde",
+ "smallvec",
 ]
 
 [[package]]
