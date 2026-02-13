@@ -12,6 +12,7 @@ use google_photoslibrary1::api::NewMediaItem;
 use google_photoslibrary1::api::Scope;
 use google_photoslibrary1::api::SimpleMediaItem;
 use google_photoslibrary1::common;
+use google_photoslibrary1::common::Connector;
 use google_photoslibrary1::hyper;
 use google_photoslibrary1::hyper_rustls;
 use google_photoslibrary1::hyper_rustls::HttpsConnector;
@@ -27,6 +28,8 @@ use http_body_util::combinators::BoxBody;
 use hyper::body::Bytes;
 use itertools::Itertools;
 use reqwest::header;
+
+use crate::Picture;
 
 /// Other google SDKs:
 ///     * service-authenticator
@@ -44,7 +47,15 @@ use reqwest::header;
 /// TODOs:
 ///     * parameterize the path to the token storage
 ///     * parameterize the path to the client secret file
-pub async fn load() {
+pub async fn upload(pics: Vec<Picture>, album_title: &str) {
+    let hub = setup().await;
+    if !check_if_album_exists(&hub, album_title).await {
+        println!("Google Photos: creating album '{album_title}'");
+        create_album(&hub, album_title.to_owned()).await;
+    }
+}
+
+pub async fn setup() -> PhotosLibrary<HttpsConnector<HttpConnector>> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .unwrap();
@@ -101,9 +112,40 @@ pub async fn load() {
                 .enable_http2()
                 .build(),
         );
-    let hub: PhotosLibrary<HttpsConnector<HttpConnector>> = PhotosLibrary::new(client, auth);
 
-    list_albums(&hub).await;
+    PhotosLibrary::new(client, auth)
+}
+
+pub async fn check_if_album_exists<C: Connector>(
+    hub: &PhotosLibrary<C>,
+    album_title: &str,
+) -> bool {
+    let mut page_token: Option<String> = None;
+
+    loop {
+        let request = hub.albums().list().add_scopes(SCOPES);
+        let request = match page_token {
+            Some(token) => request.page_token(&token),
+            None => request,
+        };
+
+        let (_, resp) = request.doit().await.unwrap();
+
+        if resp
+            .albums
+            .iter()
+            .flatten()
+            .any(|album| album.title.as_deref() == Some(album_title))
+        {
+            return true;
+        }
+
+        if resp.next_page_token.is_none() {
+            return false;
+        }
+
+        page_token = resp.next_page_token;
+    }
 }
 
 async fn list_albums(hub: &PhotosLibrary<HttpsConnector<HttpConnector>>) {
@@ -192,7 +234,7 @@ async fn add_to_library_and_album(hub: &PhotosLibrary<HttpsConnector<HttpConnect
     println!(">>>>> FAIL_CI resp: {:#?}", resp);
 }
 
-async fn create_album(hub: &PhotosLibrary<HttpsConnector<HttpConnector>>) {
+async fn create_album<C: Connector>(hub: &PhotosLibrary<C>, album_title: String) {
     let (_, resp) = hub
         .albums()
         .create(CreateAlbumRequest {
@@ -204,7 +246,7 @@ async fn create_album(hub: &PhotosLibrary<HttpsConnector<HttpConnector>>) {
                 media_items_count: None,
                 product_url: None,
                 share_info: None,
-                title: Some("Test Album".to_string()),
+                title: Some(album_title),
             }),
         })
         .add_scopes(SCOPES)

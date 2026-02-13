@@ -44,6 +44,10 @@ struct Args {
     /// Where to save the JSON file with the application's state.
     #[arg(short, long)]
     state_path: PathBuf,
+
+    /// The name of the album to upload the media files to.
+    #[arg(short, long)]
+    album_title: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -117,6 +121,7 @@ async fn main() {
     serde_json::to_writer_pretty(file, &pics).unwrap();
 
     download_all_media(&pics_to_download, &cookie, &args, &mut state).await;
+    gphotos::upload(pics_to_upload, &args.album_title).await;
 }
 
 async fn fetch_pics(cookie: &str, mut latest_saved_ids: Option<BTreeSet<u32>>) -> Pictures {
