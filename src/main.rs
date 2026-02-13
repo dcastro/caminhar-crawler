@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use chrono::NaiveDate;
 use clap::Parser;
+use itertools::Itertools;
 use reqwest::header;
 use serde::Deserialize;
 use serde::Serialize;
@@ -37,7 +38,34 @@ struct Picture {
 struct Args {
     /// Where to save the pictures.
     #[arg(short, long)]
-    dir: PathBuf,
+    pics_dir: PathBuf,
+
+    /// Where to save the JSON file with the application's state.
+    #[arg(short, long)]
+    state_path: PathBuf,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct State {
+    latest_saved_img_id: Option<u32>,
+}
+
+impl State {
+    fn load_from_file(path: &Path) -> Self {
+        if path.exists() {
+            let file = File::open(path).unwrap();
+            serde_json::from_reader(file).unwrap()
+        } else {
+            State {
+                latest_saved_img_id: None,
+            }
+        }
+    }
+
+    fn save_to_file(&self, path: &Path) {
+        let file = File::create(path).unwrap();
+        serde_json::to_writer_pretty(file, self).unwrap();
+    }
 }
 
 #[tokio::main]
@@ -46,13 +74,14 @@ async fn main() {
         std::env::var("CAMINHAR_COOKIE").expect("CAMINHAR_COOKIE environment variable not set");
 
     let args = Args::parse();
+    let mut state = State::load_from_file(&args.state_path);
 
-    let pics = fetch_pics(&cookie).await;
+    let pics = fetch_pics(&cookie, state.latest_saved_img_id).await;
 
-    download_all_media(&pics, &cookie, &args.dir).await;
+    download_all_media(&pics, &cookie, &args, &mut state).await;
 }
 
-async fn fetch_pics(cookie: &str) -> Pictures {
+async fn fetch_pics(cookie: &str, latest_saved_img_id: Option<u32>) -> Pictures {
     let url = "https://ocaminhar.educabiz.com/childctrl/childgalleryloadmore";
 
     let mut all_pics = Pictures { pictures: vec![] };
@@ -61,7 +90,7 @@ async fn fetch_pics(cookie: &str) -> Pictures {
     loop {
         println!("Fetching page {page}...");
 
-        let pics = reqwest::Client::builder()
+        let mut pics = reqwest::Client::builder()
             .build()
             .unwrap()
             .get(url)
@@ -74,7 +103,20 @@ async fn fetch_pics(cookie: &str) -> Pictures {
             .await
             .unwrap();
 
+        // If there are no more pictures, stop fetching.
         if pics.pictures.is_empty() {
+            break;
+        }
+
+        // If we have previously saved some pictures, we can stop fetching when we reach the latest saved picture.
+        if let Some(latest_saved_img_id) = latest_saved_img_id
+            && let Some((idx, _)) = pics
+                .pictures
+                .iter()
+                .find_position(|pic| pic.img_large_id == latest_saved_img_id)
+        {
+            pics.pictures.truncate(idx);
+            all_pics.pictures.extend(pics.pictures);
             break;
         }
 
@@ -85,7 +127,7 @@ async fn fetch_pics(cookie: &str) -> Pictures {
     all_pics
 }
 
-async fn download_all_media(pics: &Pictures, cookie: &str, dir: &Path) {
+async fn download_all_media(pics: &Pictures, cookie: &str, args: &Args, state: &mut State) {
     let count = pics.pictures.len();
     println!("Downloading {} media files.", count);
 
@@ -93,13 +135,20 @@ async fn download_all_media(pics: &Pictures, cookie: &str, dir: &Path) {
     let file = File::create("pics.json").unwrap();
     serde_json::to_writer_pretty(file, pics).unwrap();
 
-    for (index, pic) in pics.pictures.iter().enumerate() {
-        download_media(pic, cookie, dir, index, count).await;
+    for (index, pic) in pics.pictures.iter().rev().enumerate() {
+        download_media(pic, cookie, args, index, count, state).await;
     }
 }
 
 #[allow(clippy::match_like_matches_macro)]
-async fn download_media(pic: &Picture, cookie: &str, dir: &Path, index: usize, count: usize) {
+async fn download_media(
+    pic: &Picture,
+    cookie: &str,
+    args: &Args,
+    index: usize,
+    count: usize,
+    state: &mut State,
+) {
     let Picture {
         label,
         description,
@@ -150,12 +199,17 @@ async fn download_media(pic: &Picture, cookie: &str, dir: &Path, index: usize, c
     };
 
     // Save file
-    let file_path = dir.join(make_filename(&short_date, *img_large_id, label, extension));
+    let file_path = args
+        .pics_dir
+        .join(make_filename(&short_date, *img_large_id, label, extension));
     File::create(&file_path).unwrap().write_all(&bytes).unwrap();
 
     let file_path = fix_extension(&file_path, type_);
 
     add_metadata_tags(&file_path, is_image, &short_date, label, description);
+
+    state.latest_saved_img_id = Some(*img_large_id);
+    state.save_to_file(&args.state_path);
 }
 
 fn make_filename(
