@@ -12,16 +12,15 @@ use reqwest::header;
 use serde::Deserialize;
 use serde::Serialize;
 
-#[allow(dead_code)]
 mod gphotos;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct Pictures {
     pictures: Vec<Picture>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 struct Picture {
     label: String,
@@ -33,6 +32,69 @@ struct Picture {
     // video/mp4 or image/jpeg
     #[serde(rename = "type")]
     type_: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PictureFile {
+    file_path: PathBuf,
+    file_type: FileType,
+
+    label: String,
+    description: String,
+    short_date: NaiveDate,
+    img_large: String,
+    img_large_id: u32,
+    type_: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Copy)]
+pub enum FileType {
+    Image,
+    Video,
+    Pdf,
+}
+
+impl PictureFile {
+    fn new(pic: Picture, pics_dir: &Path) -> Self {
+        let Picture {
+            label,
+            description,
+            short_date,
+            img_large,
+            img_large_id,
+            type_,
+        } = pic;
+
+        let label = label.trim().to_owned();
+        let description = description.trim().to_owned();
+
+        let short_date = NaiveDate::parse_from_str(&short_date, "%d-%m-%Y").unwrap();
+
+        let (extension, file_type) = match type_.as_str() {
+            "video/mp4" => ("mp4", FileType::Video),
+            "image/jpeg" => ("jpg", FileType::Image),
+            "application/pdf" => ("pdf", FileType::Pdf),
+            other => panic!("unknown media type: {other}"),
+        };
+
+        let file_path = pics_dir.join(make_filename(
+            &short_date,
+            img_large_id,
+            label.trim(),
+            extension,
+        ));
+
+        Self {
+            label,
+            description,
+            short_date,
+            img_large,
+            img_large_id,
+            file_path,
+            type_,
+            file_type,
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -96,24 +158,28 @@ async fn main() {
 
     let pics = fetch_pics(&cookie, state.get_latest_img_ids()).await;
 
+    let pics = pics
+        .pictures
+        .into_iter()
+        .map(|pic| PictureFile::new(pic, &args.pics_dir))
+        .collect_vec();
+
     let pics_to_download = match state.latest_saved_img_id {
         Some(latest_saved_img_id) => pics
-            .pictures
             .iter()
             .take_while(|pic| pic.img_large_id != latest_saved_img_id)
             .cloned()
             .collect_vec(),
-        None => pics.pictures.clone(),
+        None => pics.clone(),
     };
 
     let pics_to_upload = match state.latest_uploaded_img_id {
         Some(latest_uploaded_img_id) => pics
-            .pictures
             .iter()
             .take_while(|pic| pic.img_large_id != latest_uploaded_img_id)
             .cloned()
             .collect_vec(),
-        None => pics.pictures.clone(),
+        None => pics.clone(),
     };
 
     // TODO: remove this
@@ -121,7 +187,13 @@ async fn main() {
     serde_json::to_writer_pretty(file, &pics).unwrap();
 
     download_all_media(&pics_to_download, &cookie, &args, &mut state).await;
-    gphotos::upload(pics_to_upload, &args.album_title).await;
+    gphotos::upload(
+        pics_to_upload,
+        &args.album_title,
+        &mut state,
+        &args.state_path,
+    )
+    .await;
 }
 
 async fn fetch_pics(cookie: &str, mut latest_saved_ids: Option<BTreeSet<u32>>) -> Pictures {
@@ -168,7 +240,7 @@ async fn fetch_pics(cookie: &str, mut latest_saved_ids: Option<BTreeSet<u32>>) -
     all_pics
 }
 
-async fn download_all_media(pics: &[Picture], cookie: &str, args: &Args, state: &mut State) {
+async fn download_all_media(pics: &[PictureFile], cookie: &str, args: &Args, state: &mut State) {
     let count = pics.len();
     println!("Downloading {} media files.", count);
 
@@ -179,25 +251,23 @@ async fn download_all_media(pics: &[Picture], cookie: &str, args: &Args, state: 
 
 #[allow(clippy::match_like_matches_macro)]
 async fn download_media(
-    pic: &Picture,
+    pic: &PictureFile,
     cookie: &str,
     args: &Args,
     index: usize,
     count: usize,
     state: &mut State,
 ) {
-    let Picture {
+    let PictureFile {
+        file_path,
         label,
         description,
         short_date,
         img_large,
         img_large_id,
         type_,
+        file_type,
     } = pic;
-
-    let label = label.trim();
-    let description = description.trim();
-    let short_date = NaiveDate::parse_from_str(short_date, "%d-%m-%Y").unwrap();
 
     println!(
         "Downloading media {}/{}: {img_large_id} - {label} - {img_large}",
@@ -223,27 +293,12 @@ async fn download_media(
 
     let bytes = resp.bytes().await.unwrap();
 
-    let extension = match type_.as_str() {
-        "video/mp4" => "mp4",
-        "image/jpeg" => "jpg",
-        "application/pdf" => "pdf",
-        other => panic!("unknown media type: {other}"),
-    };
-
-    let is_image = match type_.as_str() {
-        "image/jpeg" => true,
-        _ => false,
-    };
-
     // Save file
-    let file_path = args
-        .pics_dir
-        .join(make_filename(&short_date, *img_large_id, label, extension));
-    File::create(&file_path).unwrap().write_all(&bytes).unwrap();
+    File::create(file_path).unwrap().write_all(&bytes).unwrap();
 
-    let file_path = fix_extension(&file_path, type_);
+    let file_path = fix_extension(file_path, type_);
 
-    add_metadata_tags(&file_path, is_image, &short_date, label, description);
+    add_metadata_tags(&file_path, *file_type, short_date, label, description);
 
     state.latest_saved_img_id = Some(*img_large_id);
     state.save_to_file(&args.state_path);
@@ -268,7 +323,13 @@ fn make_filename(
     sanitize_filename::sanitize_with_options(filename, options)
 }
 
-fn add_metadata_tags(path: &Path, is_image: bool, short_date: &NaiveDate, label: &str, desc: &str) {
+fn add_metadata_tags(
+    path: &Path,
+    file_type: FileType,
+    short_date: &NaiveDate,
+    label: &str,
+    desc: &str,
+) {
     let short_date = convert_date_to_exif_format(short_date);
 
     // https://exiftool.org/TagNames/QuickTime.html
@@ -287,7 +348,7 @@ fn add_metadata_tags(path: &Path, is_image: bool, short_date: &NaiveDate, label:
         ],
     );
 
-    if is_image {
+    if file_type == FileType::Image {
         call_exiftool(
             path,
             &[

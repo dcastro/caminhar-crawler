@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
+use std::path::Path;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -29,7 +30,9 @@ use hyper::body::Bytes;
 use itertools::Itertools;
 use reqwest::header;
 
-use crate::Picture;
+use crate::FileType;
+use crate::PictureFile;
+use crate::State;
 
 /// Other google SDKs:
 ///     * service-authenticator
@@ -47,15 +50,48 @@ use crate::Picture;
 /// TODOs:
 ///     * parameterize the path to the token storage
 ///     * parameterize the path to the client secret file
-pub async fn upload(pics: Vec<Picture>, album_title: &str) {
+pub async fn upload(
+    pics: Vec<PictureFile>,
+    album_title: &str,
+    state: &mut State,
+    state_path: &Path,
+) {
     let hub = setup().await;
-    if !check_if_album_exists(&hub, album_title).await {
-        println!("Google Photos: creating album '{album_title}'");
-        create_album(&hub, album_title.to_owned()).await;
+    let album_id = match get_album_id(&hub, album_title).await {
+        Some(album_id) => album_id,
+        None => {
+            println!("Google Photos: creating album '{album_title}'");
+            create_album(&hub, album_title.to_owned()).await
+        }
+    };
+
+    let count = pics.len();
+    for (index, pic) in pics.into_iter().rev().enumerate() {
+        println!(
+            "Google Photos: uploading media {}/{}: {}",
+            index + 1,
+            count,
+            pic.file_path.display()
+        );
+
+        match pic.file_type {
+            FileType::Image => {}
+            FileType::Video => {}
+            FileType::Pdf => {
+                println!("Google Photos: skipping PDF file");
+                continue;
+            }
+        }
+
+        let upload_token = upload_photo(&hub, &pic.file_path).await;
+        add_to_library_and_album(&hub, &pic, album_id.clone(), upload_token).await;
+
+        state.latest_uploaded_img_id = Some(pic.img_large_id);
+        state.save_to_file(state_path);
     }
 }
 
-pub async fn setup() -> PhotosLibrary<HttpsConnector<HttpConnector>> {
+async fn setup() -> PhotosLibrary<HttpsConnector<HttpConnector>> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .unwrap();
@@ -65,7 +101,7 @@ pub async fn setup() -> PhotosLibrary<HttpsConnector<HttpConnector>> {
             tokens: Mutex::new(tokens),
         },
         Err(err) => {
-            println!(">>>>> FAIL_CI err: {:#?}", err);
+            eprintln!("{err}");
             FileTokenStorage {
                 tokens: Mutex::new(HashMap::new()),
             }
@@ -116,10 +152,8 @@ pub async fn setup() -> PhotosLibrary<HttpsConnector<HttpConnector>> {
     PhotosLibrary::new(client, auth)
 }
 
-pub async fn check_if_album_exists<C: Connector>(
-    hub: &PhotosLibrary<C>,
-    album_title: &str,
-) -> bool {
+#[allow(clippy::question_mark)]
+async fn get_album_id<C: Connector>(hub: &PhotosLibrary<C>, album_title: &str) -> Option<String> {
     let mut page_token: Option<String> = None;
 
     loop {
@@ -131,61 +165,41 @@ pub async fn check_if_album_exists<C: Connector>(
 
         let (_, resp) = request.doit().await.unwrap();
 
-        if resp
+        if let Some(album) = resp
             .albums
             .iter()
             .flatten()
-            .any(|album| album.title.as_deref() == Some(album_title))
+            .find(|album| album.title.as_deref() == Some(album_title))
         {
-            return true;
+            return album.id.clone();
         }
 
         if resp.next_page_token.is_none() {
-            return false;
+            return None;
         }
 
         page_token = resp.next_page_token;
     }
 }
 
-async fn list_albums(hub: &PhotosLibrary<HttpsConnector<HttpConnector>>) {
-    // TODO: cycle through all the page tokens
-    let (_, resp) = hub
-        .albums()
-        .list()
-        .page_token("CkQKPnR5cGUuZ29vZ2xlYXBpcy5jb20vZ29vZ2xlLnBob3Rvcy5saWJyYXJ5LnYxLkxpc3RBbGJ1bXNSZXF1ZXN0EgIIChKMA0FIX3VRNDNELXdhSmNBUzZDTUlJd0VHanRxSEJNcmM5SnlySzBLNjBsNnBrMGd3OEMtOVRGRFE3QVFkOUFSVmpaWGJ0cDVEdndaVjJ0dmxtSFFjZUdRQVRFYTdLUjBuTEt0UFNuVE83RkE1RUl6eW9FRjlTX3RNZ2V1OTN2TnV6SEJSR2ZHMjBXRkYyOHZHYVZaRHQ4Y20xMjM4Y2NHV1RXVGNNWTdUVy1qX3VXSFpkclc0RWdtcExrOGhYV1JWRVEyemN2aGoxNko0RFdxR2l1bzVPNjdPMGc1S1JnNUVBRHdncEZ3OGhnQldnSTh4OFJ4dWQ4dEhjR3I1YjlVYnBYd1BEV2Y4dTZ2VDROZ2t0SHlxcTRGRl9hS3MwdWdKUjFXNVU3SVZGbldoSlY4U3ZCNzhtQUhQRWFBaXJLNHB2d1ZBSmRha1ljR0N4WkZyVUtsUXAxbzNtRjhEY0hmWFBLdTB4MDJFM1MyYjZsT0ZMak5hMUJRd0dGVWlNOWFPcW5XR25xRERDa0NHURoA")
-        .page_size(10)
-        .exclude_non_app_created_data(false)
-        .add_scopes(SCOPES)
-        .doit()
-        .await
-        .unwrap();
-
-    println!(">>>>> FAIL_CI resp: {:#?}", resp);
-}
-
 /// Uploads a single photo using a raw binary upload request.
 ///
 /// https://developers.google.com/photos/library/guides/upload-media#uploading-bytes
-async fn upload_photo(hub: &PhotosLibrary<HttpsConnector<HttpConnector>>) {
+async fn upload_photo<C: Connector>(hub: &PhotosLibrary<C>, file_path: &Path) -> String {
     let scopes: Vec<&str> = SCOPES.iter().map(|s| s.as_ref()).collect_vec();
 
-    let token = hub.auth.get_token(scopes.as_ref()).await.unwrap().unwrap();
-
-    let client = &hub.client;
-
-    let mut file = File::open("/home/dc/Downloads/cais-de-gaia3.jpg").unwrap();
     // Read the file into memory to send as a raw upload body.
+    let mut file = File::open(file_path).unwrap();
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer).unwrap();
 
     let url = "https://photoslibrary.googleapis.com/v1/uploads";
     let body = Full::new(Bytes::from(buffer)).map_err(|err| match err {});
+    let token = hub.auth.get_token(scopes.as_ref()).await.unwrap().unwrap();
     let request = hyper::Request::builder()
         .method(hyper::Method::POST)
         .uri(url)
         .header(header::AUTHORIZATION, format!("Bearer {}", token))
-        // .header("X-Goog-Upload-File-Name", "cais-de-gaia3.jpg")
         .header("X-Goog-Upload-Protocol", "raw")
         .header(header::CONTENT_TYPE, "application/octet-stream")
         // TODO: try `common::to_body`, the same thing they use in the googlephotos lib
@@ -193,48 +207,58 @@ async fn upload_photo(hub: &PhotosLibrary<HttpsConnector<HttpConnector>>) {
         .unwrap();
 
     // Fire the upload request and wait for completion.
+    let client = &hub.client;
     let response = client.request(request).await.unwrap();
-
     let (parts, body) = response.into_parts();
-
-    println!(">>>>> FAIL_CI status: {:#?}", parts.status);
 
     let body = common::Body::new(body);
     let bytes = common::to_bytes(body).await.unwrap_or_default();
-    let upload_token = common::to_string(&bytes);
+    let body_str = common::to_string(&bytes);
 
-    println!(">>>>> FAIL_CI upload_token: {:#?}", upload_token);
+    if !parts.status.is_success() {
+        panic!("Upload failed with status '{}': {}", parts.status, body_str);
+    }
+
+    body_str.into_owned()
 }
 
-async fn add_to_library_and_album(hub: &PhotosLibrary<HttpsConnector<HttpConnector>>) {
-    let (_, resp) = hub
-        .media_items()
+async fn add_to_library_and_album<C: Connector>(
+    hub: &PhotosLibrary<C>,
+    pic: &PictureFile,
+    album_id: String,
+    upload_token: String,
+) {
+    let label_desc = merge_label_desc(pic);
+
+    hub.media_items()
         .batch_create(BatchCreateMediaItemsRequest {
-            album_id: Some(
-                "AMN8MgqxOXhPCGV9GyJIDQLODkpxpZoUxuKpr3MlWQ66j7WPVTN7uq46ScQBP87FC5n9ccsKYvGg"
-                    .to_string(),
-            ),
+            album_id: Some(album_id),
             album_position: None,
             new_media_items: Some(vec![NewMediaItem {
-                description: Some("Test Photo My description".to_string()),
+                description: Some(label_desc),
                 simple_media_item: Some(SimpleMediaItem {
-                    file_name: Some("my-test-filename.jpg".to_string()),
-                    upload_token: Some("CAIS6QIAJoFQihcsU5cX8sgx5DqgeRAvGtzZ0TnlvTTF7hzRxO0ITNkVHh3zLK5793W/rGnMvhpcvtbsxRMtvRlC9nEWTVzAUXHUQG/PYEswd90x82BlFGanyx22TWIjhJOYqWKe6zjsnsgza7OjvU69pg+GQSl67e2iDNPCNh0XtI9fTp5Dz5gUKhcmKL777x/wiauw+FT8SQZPNGK9G/Os+HlZcSTbH0VOiGXndGG7bMIZWTj8b+khR5peE0Df9/H6mj0FzvBDW6ikgKfXpYyXXWv8qjXEgMVrXeSzayUcMd/eKSobHLni3h6eN4c6rhssXInUV/2QOVyucGn+ld6btba6s8JHeRkt7AN7qxWW6uWS6LzFaX2LJ6836KS6b5f4Y/fEGGzrF94nt6bvuD80alkO7Kt4uOzRMlN7XhGnM79PEhXt/DW5P+xuvRFR24r7mZmDOOi+wHfr6HcgnxMbGBQA4/BqpaZUOLWh".to_string())
-                    ,
+                    file_name: Some(pic.file_path.file_name().unwrap().display().to_string()),
+                    upload_token: Some(upload_token),
                 }),
             }]),
         }) // .page_token("voluptua.")
-        // .page_size(10)
-        // .exclude_non_app_created_data(false)
         .add_scopes(SCOPES)
         .doit()
         .await
         .unwrap();
-
-    println!(">>>>> FAIL_CI resp: {:#?}", resp);
 }
 
-async fn create_album<C: Connector>(hub: &PhotosLibrary<C>, album_title: String) {
+fn merge_label_desc(pic: &PictureFile) -> String {
+    if pic.label.is_empty() {
+        pic.description.to_owned()
+    } else if pic.description.is_empty() {
+        pic.label.to_owned()
+    } else {
+        format!("{}\n\n{}", pic.label, pic.description)
+    }
+}
+
+async fn create_album<C: Connector>(hub: &PhotosLibrary<C>, album_title: String) -> String {
     let (_, resp) = hub
         .albums()
         .create(CreateAlbumRequest {
@@ -254,7 +278,7 @@ async fn create_album<C: Connector>(hub: &PhotosLibrary<C>, album_title: String)
         .await
         .unwrap();
 
-    println!(">>>>> FAIL_CI resp: {:#?}", resp);
+    resp.id.unwrap()
 }
 
 struct FileTokenStorage {
