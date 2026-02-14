@@ -53,7 +53,7 @@ use crate::StateManager;
 ///     * parameterize the path to the token storage
 ///     * parameterize the path to the client secret file
 pub async fn upload(pics: Vec<PictureFile>, args: &Args, state: &mut StateManager) {
-    let hub = setup().await;
+    let hub = setup(args).await;
     let album_id = match get_album_id(&hub, &args.album_title).await {
         Some(album_id) => album_id,
         None => {
@@ -94,22 +94,12 @@ pub async fn upload(pics: Vec<PictureFile>, args: &Args, state: &mut StateManage
     }
 }
 
-async fn setup() -> PhotosLibrary<HttpsConnector<HttpConnector>> {
+async fn setup(args: &Args) -> PhotosLibrary<HttpsConnector<HttpConnector>> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .unwrap();
 
-    let token_storage = match try_read_tokens() {
-        Ok(tokens) => FileTokenStorage {
-            tokens: Mutex::new(tokens),
-        },
-        Err(err) => {
-            eprintln!("{err}");
-            FileTokenStorage {
-                tokens: Mutex::new(HashMap::new()),
-            }
-        }
-    };
+    let token_storage = FileTokenStorage::load_from_file(args.pics_dir.join("state/tokens.json"));
 
     let secret_file = "/home/dc/Dropbox/dotfiles/client_secret_caminhar_crawler.json";
 
@@ -333,9 +323,8 @@ async fn create_album<C: Connector>(hub: &PhotosLibrary<C>, album_title: String)
 
 struct FileTokenStorage {
     tokens: Mutex<HashMap<Vec<String>, TokenInfo>>,
+    path: PathBuf,
 }
-
-const TOKENS_FILE: &str = "tokens.json";
 
 const SCOPES: &[Scope] = &[
     Scope::Appendonly,
@@ -351,7 +340,7 @@ impl TokenStorage for FileTokenStorage {
         let mut tokens = self.tokens.lock().unwrap();
         tokens.insert(scopes.iter().map(|s| s.to_string()).collect(), token);
 
-        let file = File::create(TOKENS_FILE).unwrap();
+        let file = File::create(&self.path).unwrap();
         serde_json::to_writer_pretty(file, &tokens.iter().collect_vec()).unwrap();
         Ok(())
     }
@@ -362,8 +351,26 @@ impl TokenStorage for FileTokenStorage {
     }
 }
 
-fn try_read_tokens() -> Result<HashMap<Vec<String>, TokenInfo>, std::io::Error> {
-    let file = File::open(TOKENS_FILE)?;
+impl FileTokenStorage {
+    fn load_from_file(path: PathBuf) -> FileTokenStorage {
+        match try_read_tokens(&path) {
+            Ok(tokens) => FileTokenStorage {
+                tokens: Mutex::new(tokens),
+                path,
+            },
+            Err(err) => {
+                eprintln!("{err}");
+                FileTokenStorage {
+                    tokens: Mutex::new(HashMap::new()),
+                    path,
+                }
+            }
+        }
+    }
+}
+
+fn try_read_tokens(path: &Path) -> Result<HashMap<Vec<String>, TokenInfo>, std::io::Error> {
+    let file = File::open(path)?;
     let tokens: Vec<(Vec<String>, TokenInfo)> = serde_json::from_reader(file)?;
     Ok(tokens.into_iter().collect())
 }
