@@ -295,13 +295,17 @@ async fn add_to_library_and_album<C: Connector>(
 }
 
 fn merge_label_desc(pic: &PictureFile) -> String {
-    if pic.label.is_empty() {
+    let mut label_desc = if pic.label.is_empty() {
         pic.description.to_owned()
     } else if pic.description.is_empty() {
         pic.label.to_owned()
     } else {
         format!("{}\n\n{}", pic.label, pic.description)
-    }
+    };
+
+    // Google Photos has a max description length of 1000 chars
+    label_desc.truncate(1000);
+    label_desc
 }
 
 async fn create_album<C: Connector>(hub: &PhotosLibrary<C>, album_title: String) -> String {
