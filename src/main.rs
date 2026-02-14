@@ -121,6 +121,10 @@ struct Args {
     /// The name of the album to upload the media files to.
     #[arg(short, long)]
     album_title: String,
+
+    /// The path to the Google client OAuth2 secret JSON file.
+    #[arg(short, long)]
+    google_secrets_path: PathBuf,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

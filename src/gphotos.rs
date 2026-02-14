@@ -48,10 +48,6 @@ use crate::StateManager;
 ///     * https://github.com/gphotosuploader/gphotos-uploader-cli
 ///     * https://github.com/int128/gpup
 ///     * https://docs.rs/crate/google-photoslibrary1-cli/latest
-///
-/// TODOs:
-///     * parameterize the path to the token storage
-///     * parameterize the path to the client secret file
 pub async fn upload(pics: Vec<PictureFile>, args: &Args, state: &mut StateManager) {
     let hub = setup(args).await;
     let album_id = match get_album_id(&hub, &args.album_title).await {
@@ -101,11 +97,10 @@ async fn setup(args: &Args) -> PhotosLibrary<HttpsConnector<HttpConnector>> {
 
     let token_storage = FileTokenStorage::load_from_file(args.pics_dir.join("state/tokens.json"));
 
-    let secret_file = "/home/dc/Dropbox/dotfiles/client_secret_caminhar_crawler.json";
-
-    let secret: yup_oauth2::ApplicationSecret = yup_oauth2::read_application_secret(secret_file)
-        .await
-        .expect("client secret could not be read");
+    let secret: yup_oauth2::ApplicationSecret =
+        yup_oauth2::read_application_secret(&args.google_secrets_path)
+            .await
+            .expect("client secret could not be read");
 
     // Instantiate the authenticator. It will choose a suitable authentication flow for you,
     // unless you replace  `None` with the desired Flow.
