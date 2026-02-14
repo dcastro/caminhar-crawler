@@ -34,7 +34,7 @@ use reqwest::header;
 use crate::Args;
 use crate::FileType;
 use crate::PictureFile;
-use crate::State;
+use crate::StateManager;
 
 /// Other google SDKs:
 ///     * service-authenticator
@@ -52,7 +52,7 @@ use crate::State;
 /// TODOs:
 ///     * parameterize the path to the token storage
 ///     * parameterize the path to the client secret file
-pub async fn upload(pics: Vec<PictureFile>, args: &Args, state: &mut State) {
+pub async fn upload(pics: Vec<PictureFile>, args: &Args, state: &mut StateManager) {
     let hub = setup().await;
     let album_id = match get_album_id(&hub, &args.album_title).await {
         Some(album_id) => album_id,
@@ -89,8 +89,8 @@ pub async fn upload(pics: Vec<PictureFile>, args: &Args, state: &mut State) {
         let upload_token = upload_photo(&hub, pic_file_path).await;
         add_to_library_and_album(&hub, &pic, album_id.clone(), upload_token).await;
 
-        state.latest_uploaded_img_id = Some(pic.img_large_id);
-        state.save_to_file(&args.state_path);
+        state.state.latest_uploaded_img_id = Some(pic.img_large_id);
+        state.save_to_file();
     }
 }
 

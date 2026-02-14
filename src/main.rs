@@ -118,10 +118,6 @@ struct Args {
     #[arg(short, long)]
     pics_dir: PathBuf,
 
-    /// Where to save the JSON file with the application's state.
-    #[arg(short, long)]
-    state_path: PathBuf,
-
     /// The name of the album to upload the media files to.
     #[arg(short, long)]
     album_title: String,
@@ -133,30 +129,37 @@ struct State {
     latest_uploaded_img_id: Option<u32>,
 }
 
-impl State {
-    fn load_from_file(path: &Path) -> Self {
-        if path.exists() {
-            let file = File::open(path).unwrap();
+struct StateManager {
+    state: State,
+    path: PathBuf,
+}
+
+impl StateManager {
+    fn load_from_file(path: PathBuf) -> Self {
+        let state = if path.exists() {
+            let file = File::open(&path).unwrap();
             serde_json::from_reader(file).unwrap()
         } else {
             State {
                 latest_saved_img_id: None,
                 latest_uploaded_img_id: None,
             }
-        }
+        };
+
+        StateManager { state, path }
     }
 
-    fn save_to_file(&self, path: &Path) {
-        let file = File::create(path).unwrap();
-        serde_json::to_writer_pretty(file, self).unwrap();
+    fn save_to_file(&self) {
+        let file = File::create(&self.path).unwrap();
+        serde_json::to_writer_pretty(file, &self.state).unwrap();
     }
 
     fn get_latest_img_ids(&self) -> Option<BTreeSet<u32>> {
         let mut ids = BTreeSet::new();
-        if let Some(id) = self.latest_saved_img_id {
+        if let Some(id) = self.state.latest_saved_img_id {
             ids.insert(id);
         }
-        if let Some(id) = self.latest_uploaded_img_id {
+        if let Some(id) = self.state.latest_uploaded_img_id {
             ids.insert(id);
         }
         if ids.is_empty() { None } else { Some(ids) }
@@ -169,7 +172,7 @@ async fn main() {
         std::env::var("CAMINHAR_COOKIE").expect("CAMINHAR_COOKIE environment variable not set");
 
     let args = Args::parse();
-    let mut state = State::load_from_file(&args.state_path);
+    let mut state = StateManager::load_from_file(args.pics_dir.join("state/state.json"));
 
     let pics = fetch_pics(&cookie, state.get_latest_img_ids()).await;
 
@@ -197,7 +200,7 @@ async fn main() {
     // let file = File::open("pics.json").unwrap();
     // let pics: Vec<PictureFile> = serde_json::from_reader(file).unwrap();
 
-    let pics_to_download = match state.latest_saved_img_id {
+    let pics_to_download = match state.state.latest_saved_img_id {
         Some(latest_saved_img_id) => pics
             .iter()
             .take_while(|pic| pic.img_large_id != latest_saved_img_id)
@@ -206,7 +209,7 @@ async fn main() {
         None => pics.clone(),
     };
 
-    let pics_to_upload = match state.latest_uploaded_img_id {
+    let pics_to_upload = match state.state.latest_uploaded_img_id {
         Some(latest_uploaded_img_id) => pics
             .iter()
             .take_while(|pic| pic.img_large_id != latest_uploaded_img_id)
@@ -215,7 +218,7 @@ async fn main() {
         None => pics.clone(),
     };
 
-    download_all_media(&pics_to_download, &cookie, &args, &mut state).await;
+    download_all_media(&pics_to_download, &cookie, &mut state).await;
     gphotos::upload(pics_to_upload, &args, &mut state).await;
 }
 
@@ -299,12 +302,12 @@ async fn fetch_pics(
     }
 }
 
-async fn download_all_media(pics: &[PictureFile], cookie: &str, args: &Args, state: &mut State) {
+async fn download_all_media(pics: &[PictureFile], cookie: &str, state: &mut StateManager) {
     let count = pics.len();
     println!("Downloading {} media files.", count);
 
     for (index, pic) in pics.iter().rev().enumerate() {
-        download_media(pic, cookie, args, index, count, state).await;
+        download_media(pic, cookie, index, count, state).await;
     }
 }
 
@@ -312,10 +315,9 @@ async fn download_all_media(pics: &[PictureFile], cookie: &str, args: &Args, sta
 async fn download_media(
     pic: &PictureFile,
     cookie: &str,
-    args: &Args,
     index: usize,
     count: usize,
-    state: &mut State,
+    state: &mut StateManager,
 ) {
     let PictureFile {
         file_path,
@@ -366,8 +368,8 @@ async fn download_media(
         *img_large_id,
     );
 
-    state.latest_saved_img_id = Some(*img_large_id);
-    state.save_to_file(&args.state_path);
+    state.state.latest_saved_img_id = Some(*img_large_id);
+    state.save_to_file();
 }
 
 fn make_filename(
