@@ -5,7 +5,10 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 
+use chrono::DateTime;
 use chrono::NaiveDate;
+use chrono::TimeDelta;
+use chrono::Utc;
 use clap::Parser;
 use itertools::Itertools;
 use reqwest::header;
@@ -41,10 +44,12 @@ struct PictureFile {
 
     label: String,
     description: String,
-    short_date: NaiveDate,
     img_large: String,
     img_large_id: u32,
     type_: String,
+
+    // The timestamp we store in EXIF tags.
+    timestamp: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, Copy)]
@@ -55,11 +60,11 @@ pub enum FileType {
 }
 
 impl PictureFile {
-    fn new(pic: Picture, pics_dir: &Path) -> Self {
+    fn new(pic: Picture, short_date: NaiveDate, day_idx: usize, pics_dir: &Path) -> Self {
         let Picture {
             label,
             description,
-            short_date,
+            short_date: _,
             img_large,
             img_large_id,
             type_,
@@ -67,8 +72,6 @@ impl PictureFile {
 
         let label = label.trim().to_owned();
         let description = description.trim().to_owned();
-
-        let short_date = NaiveDate::parse_from_str(&short_date, "%d-%m-%Y").unwrap();
 
         let (extension, file_type) = match type_.as_str() {
             "video/mp4" => ("mp4", FileType::Video),
@@ -84,15 +87,27 @@ impl PictureFile {
             extension,
         ));
 
+        // If we set the hour to 00:00, then Google Photos will display this image in the previous day.
+        // So we set it to 13:00 instead.
+        //
+        // We also add the `day_idx` to the timestamp, so that if there are multiple images with the same date,
+        // they will be sorted by their index.
+        let timestamp = short_date
+            .and_hms_opt(13, 0, 0)
+            .unwrap()
+            .checked_add_signed(TimeDelta::seconds(day_idx as i64))
+            .unwrap()
+            .and_utc();
+
         Self {
             label,
             description,
-            short_date,
             img_large,
             img_large_id,
             file_path,
             type_,
             file_type,
+            timestamp,
         }
     }
 }
@@ -159,10 +174,21 @@ async fn main() {
     let pics = fetch_pics(&cookie, state.get_latest_img_ids()).await;
 
     let pics = pics
-        .pictures
         .into_iter()
-        .map(|pic| PictureFile::new(pic, &args.pics_dir))
+        .map(|(short_date, pics)| {
+            let short_date = NaiveDate::parse_from_str(&short_date, "%d-%m-%Y").unwrap();
+            let pics = pics
+                .into_iter()
+                .rev()
+                .enumerate()
+                .map(|(day_idx, pic)| PictureFile::new(pic, short_date, day_idx, &args.pics_dir))
+                .rev()
+                .collect_vec();
+            (short_date, pics)
+        })
         .collect_vec();
+
+    let pics = pics.into_iter().flat_map(|(_, pics)| pics).collect_vec();
 
     let pics_to_download = match state.latest_saved_img_id {
         Some(latest_saved_img_id) => pics
@@ -196,11 +222,27 @@ async fn main() {
     .await;
 }
 
-async fn fetch_pics(cookie: &str, mut latest_saved_ids: Option<BTreeSet<u32>>) -> Pictures {
+/// NOTE: The dates we receive from the API are in the format `dd-MM-yyyy`, and they don't have a time component.
+/// So pictures taken in the same day will not have a defined order, and Google Photos might sort them in unexpected ways.
+///
+/// To solve this problem, we set the timestamp of each picture to `dd-MM-yyyy 13:00:00`, and then we add a `N` seconds to the timestamp of each picture,
+/// so that they are sorted in the same order as they appear in the API.
+///
+/// The `N` seconds we add depends on the order of that picture of that day.
+/// E.g. if there are 3 pictures taken in the same day, we set their timestamps to: `13:00:00`, `13:00:01`, `13:00:02`.
+///
+/// To be able to do this, we have to fetch all the pictures of a day before processing them.
+/// The results are also grouped by day.
+async fn fetch_pics(
+    cookie: &str,
+    mut latest_saved_ids: Option<BTreeSet<u32>>,
+) -> Vec<(String, Vec<Picture>)> {
     let url = "https://ocaminhar.educabiz.com/childctrl/childgalleryloadmore";
 
-    let mut all_pics = Pictures { pictures: vec![] };
+    let mut all_pics: Vec<(String, Vec<Picture>)> = vec![];
     let mut page = 1;
+
+    let mut day_pics: Vec<Picture> = vec![];
 
     loop {
         println!("Fetching page {page}...");
@@ -220,24 +262,44 @@ async fn fetch_pics(cookie: &str, mut latest_saved_ids: Option<BTreeSet<u32>>) -
 
         // If there are no more pictures, stop fetching.
         if pics.pictures.is_empty() {
-            break;
+            // If we were in the middle of processing a day, add it to `all_pics`.
+            if let Some(first_pic) = day_pics.first() {
+                all_pics.push((first_pic.short_date.clone(), day_pics));
+            }
+
+            return all_pics;
         }
 
-        // We break when we've reached either the last saved picture or the last updloaded picture, whichever is oldest.
         for pic in pics.pictures {
-            if let Some(latest_saved_ids) = &mut latest_saved_ids {
-                latest_saved_ids.remove(&pic.img_large_id);
-                if latest_saved_ids.is_empty() {
+            // We reached a new day, so we process the previous day's pictures.
+            if let Some(first_pic) = day_pics.first()
+                && pic.short_date != first_pic.short_date
+            {
+                // Mark these ID as seen
+                // and then push to `all_pics`
+                if let Some(latest_saved_ids) = &mut latest_saved_ids {
+                    for day_pic in &day_pics {
+                        latest_saved_ids.remove(&day_pic.img_large_id);
+                    }
+                }
+                all_pics.push((first_pic.short_date.clone(), day_pics));
+
+                // If we've seen all the IDs, we can stop fetching.
+                if let Some(latest_saved_ids) = &mut latest_saved_ids
+                    && latest_saved_ids.is_empty()
+                {
                     return all_pics;
                 }
+
+                day_pics = vec![pic];
+            } else {
+                // We're still processing the same day
+                day_pics.push(pic);
             }
-            all_pics.pictures.push(pic);
         }
 
         page += 1;
     }
-
-    all_pics
 }
 
 async fn download_all_media(pics: &[PictureFile], cookie: &str, args: &Args, state: &mut State) {
@@ -262,11 +324,11 @@ async fn download_media(
         file_path,
         label,
         description,
-        short_date,
         img_large,
         img_large_id,
         type_,
         file_type,
+        timestamp,
     } = pic;
 
     println!(
@@ -301,7 +363,7 @@ async fn download_media(
     add_metadata_tags(
         &file_path,
         *file_type,
-        short_date,
+        timestamp,
         label,
         description,
         *img_large_id,
@@ -333,12 +395,12 @@ fn make_filename(
 fn add_metadata_tags(
     path: &Path,
     file_type: FileType,
-    short_date: &NaiveDate,
+    timestamp: &DateTime<Utc>,
     label: &str,
     desc: &str,
     img_large_id: u32,
 ) {
-    let short_date = convert_date_to_exif_format(short_date);
+    let short_date = format_date_as_exif(timestamp);
 
     // https://exiftool.org/TagNames/QuickTime.html
     // https://exiftool.org/TagNames/XMP.html
@@ -389,13 +451,9 @@ fn call_exiftool(path: &Path, tags: &[(&str, &str)]) {
     }
 }
 
-/// Converts `13-01-2026` to `2026:01:13 13:00:00+00:00`
-fn convert_date_to_exif_format(short_date: &NaiveDate) -> String {
-    // If we set the hour to 00:00, then Google Photos will display this image in the previous day.
-    // So we set it to 13:00 instead.
-    let datetime = short_date.and_hms_opt(13, 0, 0).unwrap();
-    let datetime_utc = datetime.and_utc();
-    datetime_utc.format("%Y:%m:%d %H:%M:%S%:z").to_string()
+/// Format date as `2026:01:13 13:00:00+00:00`
+fn format_date_as_exif(timestamp: &DateTime<Utc>) -> String {
+    timestamp.format("%Y:%m:%d %H:%M:%S%:z").to_string()
 }
 
 /// Some files are incorrectly tagged.

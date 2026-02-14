@@ -66,6 +66,8 @@ pub async fn upload(
     };
 
     let count = pics.len();
+    println!("Google Photos: uploading {} media files.", count);
+
     for (index, pic) in pics.into_iter().rev().enumerate() {
         println!(
             "Google Photos: uploading media {}/{}: {}",
