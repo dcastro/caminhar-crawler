@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -30,6 +31,7 @@ use hyper::body::Bytes;
 use itertools::Itertools;
 use reqwest::header;
 
+use crate::Args;
 use crate::FileType;
 use crate::PictureFile;
 use crate::State;
@@ -50,30 +52,29 @@ use crate::State;
 /// TODOs:
 ///     * parameterize the path to the token storage
 ///     * parameterize the path to the client secret file
-pub async fn upload(
-    pics: Vec<PictureFile>,
-    album_title: &str,
-    state: &mut State,
-    state_path: &Path,
-) {
+pub async fn upload(pics: Vec<PictureFile>, args: &Args, state: &mut State) {
     let hub = setup().await;
-    let album_id = match get_album_id(&hub, album_title).await {
+    let album_id = match get_album_id(&hub, &args.album_title).await {
         Some(album_id) => album_id,
         None => {
-            println!("Google Photos: creating album '{album_title}'");
-            create_album(&hub, album_title.to_owned()).await
+            println!("Google Photos: creating album '{}'", &args.album_title);
+            create_album(&hub, args.album_title.to_owned()).await
         }
     };
 
     let count = pics.len();
     println!("Google Photos: uploading {} media files.", count);
 
+    let existing_files = get_existing_filepaths(&args.pics_dir);
+
     for (index, pic) in pics.into_iter().rev().enumerate() {
+        let pic_file_path = find_file(pic.img_large_id, &existing_files);
+
         println!(
             "Google Photos: uploading media {}/{}: {}",
             index + 1,
             count,
-            pic.file_path.display()
+            pic_file_path.display()
         );
 
         match pic.file_type {
@@ -85,11 +86,11 @@ pub async fn upload(
             }
         }
 
-        let upload_token = upload_photo(&hub, &pic.file_path).await;
+        let upload_token = upload_photo(&hub, pic_file_path).await;
         add_to_library_and_album(&hub, &pic, album_id.clone(), upload_token).await;
 
         state.latest_uploaded_img_id = Some(pic.img_large_id);
-        state.save_to_file(state_path);
+        state.save_to_file(&args.state_path);
     }
 }
 
@@ -182,6 +183,49 @@ async fn get_album_id<C: Connector>(hub: &PhotosLibrary<C>, album_title: &str) -
 
         page_token = resp.next_page_token;
     }
+}
+
+fn get_existing_filepaths(dir: &Path) -> Vec<PathBuf> {
+    let mut filepaths = Vec::new();
+
+    let entries = std::fs::read_dir(dir).unwrap();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+
+        filepaths.push(entry.path());
+    }
+
+    filepaths
+}
+
+/// Find the filename for the image with the given ID.
+///
+/// We have to look it up in the filesystem, we can't rely on `PictureFile.file_path`
+/// because the file extension can be different than expected (e.g. some images are downloaded as .jpg and later "corrected" to .png).
+fn find_file(img_large_id: u32, existing_files: &[PathBuf]) -> &Path {
+    let matches = existing_files
+        .iter()
+        .filter(|existing_filepath| {
+            existing_filepath
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains(&format!(" [{img_large_id}] "))
+        })
+        .collect_vec();
+
+    if matches.len() > 1 {
+        panic!(
+            "Multiple files found for image ID {img_large_id} in the download directory: {matches:#?}"
+        );
+    }
+
+    matches.first().unwrap_or_else(|| {
+        panic!("File with ID {img_large_id} not found in the download directory")
+    })
 }
 
 /// Uploads a single photo using a raw binary upload request.

@@ -37,7 +37,7 @@ struct Picture {
     type_: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PictureFile {
     file_path: PathBuf,
     file_type: FileType,
@@ -52,7 +52,7 @@ struct PictureFile {
     timestamp: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq, Copy)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
 pub enum FileType {
     Image,
     Video,
@@ -190,6 +190,13 @@ async fn main() {
 
     let pics = pics.into_iter().flat_map(|(_, pics)| pics).collect_vec();
 
+    // TODO: remove this
+    let file = File::create("pics.json").unwrap();
+    serde_json::to_writer_pretty(file, &pics).unwrap();
+
+    // let file = File::open("pics.json").unwrap();
+    // let pics: Vec<PictureFile> = serde_json::from_reader(file).unwrap();
+
     let pics_to_download = match state.latest_saved_img_id {
         Some(latest_saved_img_id) => pics
             .iter()
@@ -208,18 +215,8 @@ async fn main() {
         None => pics.clone(),
     };
 
-    // TODO: remove this
-    let file = File::create("pics.json").unwrap();
-    serde_json::to_writer_pretty(file, &pics).unwrap();
-
     download_all_media(&pics_to_download, &cookie, &args, &mut state).await;
-    gphotos::upload(
-        pics_to_upload,
-        &args.album_title,
-        &mut state,
-        &args.state_path,
-    )
-    .await;
+    gphotos::upload(pics_to_upload, &args, &mut state).await;
 }
 
 /// NOTE: The dates we receive from the API are in the format `dd-MM-yyyy`, and they don't have a time component.
@@ -380,7 +377,7 @@ fn make_filename(
     extension: &str,
 ) -> String {
     let short_date = short_date.format("%Y-%m-%d").to_string();
-    let filename = format!("[{short_date}] {img_large_id} {label}.{extension}");
+    let filename = format!("[{short_date}] [{img_large_id}] {label}.{extension}");
 
     // Some descriptions have invalid characters, e.g. '/', so we have to sanitize them.
     // WARNING: this will also truncate filenames to 255 chars.
