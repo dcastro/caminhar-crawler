@@ -298,7 +298,14 @@ async fn download_media(
 
     let file_path = fix_extension(file_path, type_);
 
-    add_metadata_tags(&file_path, *file_type, short_date, label, description);
+    add_metadata_tags(
+        &file_path,
+        *file_type,
+        short_date,
+        label,
+        description,
+        *img_large_id,
+    );
 
     state.latest_saved_img_id = Some(*img_large_id);
     state.save_to_file(&args.state_path);
@@ -329,6 +336,7 @@ fn add_metadata_tags(
     short_date: &NaiveDate,
     label: &str,
     desc: &str,
+    img_large_id: u32,
 ) {
     let short_date = convert_date_to_exif_format(short_date);
 
@@ -345,6 +353,8 @@ fn add_metadata_tags(
             ("Title", label),
             // Google Photos displays the `Description` tag in the image's properties sidebar.
             ("Description", desc),
+            // We set the nanoseconds to the image ID, so that if there are multiple images with the same date, they will be sorted by their ID.
+            ("SubSecTime", &img_large_id.to_string()),
         ],
     );
 
@@ -354,6 +364,7 @@ fn add_metadata_tags(
             &[
                 ("DateTimeOriginal", &short_date),
                 ("ImageDescription", desc),
+                ("SubSecTimeOriginal", &img_large_id.to_string()),
             ],
         );
     }
@@ -380,6 +391,8 @@ fn call_exiftool(path: &Path, tags: &[(&str, &str)]) {
 
 /// Converts `13-01-2026` to `2026:01:13 13:00:00+00:00`
 fn convert_date_to_exif_format(short_date: &NaiveDate) -> String {
+    // If we set the hour to 00:00, then Google Photos will display this image in the previous day.
+    // So we set it to 13:00 instead.
     let datetime = short_date.and_hms_opt(13, 0, 0).unwrap();
     let datetime_utc = datetime.and_utc();
     datetime_utc.format("%Y:%m:%d %H:%M:%S%:z").to_string()
