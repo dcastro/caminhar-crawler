@@ -50,7 +50,19 @@ use crate::StateManager;
 ///     * https://docs.rs/crate/google-photoslibrary1-cli/latest
 pub async fn upload(pics: Vec<PictureFile>, args: &Args, state: &mut StateManager) {
     let hub = setup(args).await;
-    let album_id = match get_album_id(&hub, &args.album_title).await {
+
+    // NOTE: wrap the first call to the Google API in a timeout.
+    // In case the access/refresh tokens are no longer valid, the library will ask us to go through the OAuth2 flow to authenticate.
+    // When we're running the script as a cron job and this happens, we don't want the job to hang indefinitely.
+    // We want the job to fail and report an error instead, so we can fix the authentication issue and rerun the job.
+    let get_album_id_result = tokio::time::timeout(
+        std::time::Duration::from_secs(3 * 60),
+        get_album_id(&hub, &args.album_title),
+    )
+    .await
+    .unwrap();
+
+    let album_id = match get_album_id_result {
         Some(album_id) => album_id,
         None => {
             println!("Google Photos: creating album '{}'", &args.album_title);

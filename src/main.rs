@@ -224,6 +224,7 @@ async fn main() {
 
     download_all_media(&pics_to_download, &cookie, &mut state).await;
     gphotos::upload(pics_to_upload, &args, &mut state).await;
+    println!("Done!");
 }
 
 /// NOTE: The dates we receive from the API are in the format `dd-MM-yyyy`, and they don't have a time component.
